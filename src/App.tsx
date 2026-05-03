@@ -1,0 +1,629 @@
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import Papa from 'papaparse';
+import { 
+  Candle, 
+  Trade, 
+  TradeType, 
+  TradeRecord, 
+  MADirection 
+} from './types';
+import { CandlestickChart } from './components/CandlestickChart';
+import { analyzePerformance } from './services/geminiService';
+import { 
+  Play, 
+  Plus, 
+  Minus, 
+  Upload, 
+  TrendingUp, 
+  TrendingDown, 
+  Wallet,
+  History,
+  XCircle,
+  Database
+} from 'lucide-react';
+import { clsx, type ClassValue } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+
+function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+
+export default function App() {
+  const [fullData, setFullData] = useState<Candle[]>([]);
+  const [currentIndex, setCurrentIndex] = useState(-1);
+  const [visibleStartIndex, setVisibleStartIndex] = useState(0);
+  const [balance, setBalance] = useState(1000000); // This now represents Liquid Cash
+  const [initialBalance, setInitialBalance] = useState(1000000);
+  const [baseBalance, setBaseBalance] = useState(1000000);
+  const [multiplier, setMultiplier] = useState(1);
+  const [positionSize, setPositionSize] = useState(1);
+  const [trades, setTrades] = useState<Trade[]>([]);
+  const [records, setRecords] = useState<TradeRecord[]>([]);
+  const [maPeriods, setMaPeriods] = useState<number[]>([5, 10, 20, 60, 120, 240]);
+  const [averageEntryPrice, setAverageEntryPrice] = useState<number>(0);
+  const [analysis, setAnalysis] = useState<string | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const activePosition = useMemo(() => {
+    return trades.reduce((acc, t) => acc + (t.type === TradeType.BUY ? t.quantity : -t.quantity), 0);
+  }, [trades]);
+
+  const totalAssets = useMemo(() => {
+    if (currentIndex === -1 || fullData.length === 0) return balance;
+    const currentPrice = fullData[currentIndex].Close;
+    // Current assets = Cash (balance) + Market Value of open position (activePosition * price * multiplier)
+    return balance + (activePosition * currentPrice * multiplier);
+  }, [balance, activePosition, currentIndex, fullData, multiplier]);
+
+  const currentPnL = useMemo(() => {
+    if (activePosition === 0) return 0;
+    return totalAssets - baseBalance;
+  }, [activePosition, totalAssets, baseBalance]);
+
+  const currentMATrends = useMemo(() => {
+    if (currentIndex === -1 || fullData.length === 0) return [];
+    return maPeriods.map(period => {
+      const getMA = (idx: number) => {
+        const slice = fullData.slice(Math.max(0, idx - period + 1), idx + 1);
+        if (slice.length === 0) return 0;
+        return slice.reduce((sum, c) => sum + c.Close, 0) / slice.length;
+      };
+      const currentMA = getMA(currentIndex);
+      const prevMA = getMA(currentIndex - 1);
+      
+      let direction = MADirection.FLAT;
+      if (currentMA > prevMA) direction = MADirection.UP;
+      else if (currentMA < prevMA) direction = MADirection.DOWN;
+      
+      return { period, value: currentMA, direction };
+    });
+  }, [currentIndex, fullData, maPeriods]);
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    Papa.parse(file, {
+      header: true,
+      dynamicTyping: true,
+      complete: (results) => {
+        const parsed = results.data
+          .filter((row: any) => row.Date && row.Time && row.Open)
+          .map((row: any) => ({
+            ...row,
+            timestamp: new Date(`${row.Date} ${row.Time}`).getTime()
+          }))
+          .sort((a: any, b: any) => a.timestamp - b.timestamp);
+
+        setFullData(parsed);
+        const startPoint = Math.min(parsed.length - 100, Math.floor(Math.random() * (parsed.length - 300)) + 250);
+        setCurrentIndex(startPoint);
+        setVisibleStartIndex(Math.max(0, startPoint - 80));
+      }
+    });
+  };
+
+  const handleNext = () => {
+    if (currentIndex < fullData.length - 1) {
+      setCurrentIndex(prev => prev + 1);
+      if (currentIndex - visibleStartIndex > 80) {
+        setVisibleStartIndex(prev => prev + 1);
+      }
+    }
+  };
+
+  const getMATrends = (index: number): { period: number, direction: MADirection }[] => {
+    return maPeriods.map(period => {
+      if (index < period) return { period, direction: MADirection.FLAT };
+      const getMA = (idx: number) => {
+        const slice = fullData.slice(Math.max(0, idx - period + 1), idx + 1);
+        if (slice.length === 0) return 0;
+        return slice.reduce((sum, c) => sum + c.Close, 0) / slice.length;
+      };
+      const currentMA = getMA(index);
+      const prevMA = getMA(index - 1);
+      
+      let direction = MADirection.FLAT;
+      if (currentMA > prevMA) direction = MADirection.UP;
+      else if (currentMA < prevMA) direction = MADirection.DOWN;
+      
+      return { period, direction };
+    });
+  };
+
+  const executeTrade = (type: TradeType) => {
+    if (currentIndex === -1) return;
+    
+    const candle = fullData[currentIndex];
+    const tradePrice = candle.Close;
+    const tradeValue = tradePrice * positionSize * multiplier;
+
+    if (type === TradeType.BUY && balance < tradeValue) {
+      alert("現金不足！");
+      return;
+    }
+
+    const maTrends = getMATrends(currentIndex);
+    
+    // Calculate realized profit and update average entry price
+    let realizedProfit: number | null = null;
+    let nextAvgPrice = averageEntryPrice;
+
+    // Determine if we are adding to position or reducing/flipping
+    const isAdding = (activePosition >= 0 && type === TradeType.BUY) || (activePosition <= 0 && type === TradeType.SELL);
+    
+    if (isAdding) {
+      // Adding to position (or opening new)
+      const currentAbsPos = Math.abs(activePosition);
+      nextAvgPrice = (currentAbsPos * averageEntryPrice + positionSize * tradePrice) / (currentAbsPos + positionSize);
+    } else {
+      // Reducing or flipping position
+      const qtyToClose = Math.min(Math.abs(activePosition), positionSize);
+      
+      // Profit formula: 
+      // Long: (SellPrice - AvgPrice) * Qty
+      // Short: (AvgPrice - BuyPrice) * Qty
+      const unitProfit = activePosition > 0 ? (tradePrice - averageEntryPrice) : (averageEntryPrice - tradePrice);
+      realizedProfit = unitProfit * qtyToClose * multiplier;
+      
+      // Handle floating point precision for $0
+      if (Math.abs(realizedProfit) < 0.0001) realizedProfit = 0;
+
+      // If we flipped the position (e.g. from +10 to -5)
+      if (positionSize > Math.abs(activePosition)) {
+        nextAvgPrice = tradePrice;
+      } else if (positionSize === Math.abs(activePosition)) {
+        nextAvgPrice = 0;
+      }
+      // If we reduced but stayed same direction, nextAvgPrice stays same
+    }
+
+    setAverageEntryPrice(nextAvgPrice);
+
+    const transactionCashEffect = type === TradeType.BUY ? -tradeValue : tradeValue;
+    const newBalance = balance + transactionCashEffect;
+    setBalance(newBalance);
+
+    const nextPosition = activePosition + (type === TradeType.BUY ? positionSize : -positionSize);
+
+    if (activePosition === 0 && nextPosition !== 0) {
+      setBaseBalance(balance);
+    }
+
+    const newTrade: Trade = {
+      id: Math.random().toString(36).substr(2, 9),
+      timestamp: candle.timestamp,
+      date: candle.Date,
+      time: candle.Time,
+      type,
+      price: tradePrice,
+      quantity: positionSize,
+      maTrends: maTrends
+    };
+
+    const currentAssetsAtTrade = newBalance + (nextPosition * tradePrice * multiplier);
+
+    setTrades(prev => [...prev, newTrade]);
+    
+      setRecords(prev => [
+      {
+        id: newTrade.id,
+        date: newTrade.date,
+        time: newTrade.time,
+        type: newTrade.type,
+        quantity: newTrade.quantity,
+        maTrends: newTrade.maTrends,
+        profit: realizedProfit,
+        totalBalance: currentAssetsAtTrade
+      },
+      ...prev
+    ]);
+
+    handleNext();
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't trigger if user is typing in an input
+      if (document.activeElement?.tagName === 'INPUT') return;
+      if (fullData.length === 0) return;
+
+      const key = e.key.toLowerCase();
+      
+      if (key === ' ') {
+        e.preventDefault();
+        handleNext();
+      } else if (key === 'b') {
+        e.preventDefault();
+        executeTrade(TradeType.BUY);
+      } else if (key === 's') {
+        e.preventDefault();
+        executeTrade(TradeType.SELL);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [fullData.length, currentIndex, balance, activePosition, positionSize, multiplier]);
+
+  const handleEndGame = async () => {
+    setIsAnalyzing(true);
+    const analysisResult = await analyzePerformance(records, totalAssets, initialBalance);
+    setAnalysis(analysisResult);
+    setIsAnalyzing(false);
+  };
+
+  return (
+    <div className="h-screen bg-slate-950 text-slate-100 font-sans flex flex-col overflow-hidden">
+      {fullData.length === 0 ? (
+        // Initial Setup View
+        <div className="flex-1 flex flex-col items-center overflow-y-auto bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 p-4 md:p-8">
+          <div className="w-full max-w-xl bg-slate-900/50 backdrop-blur-xl border border-slate-800 p-6 md:p-10 rounded-3xl shadow-2xl flex flex-col gap-6 md:gap-8 my-auto">
+            <div className="text-center space-y-2">
+              <div className="inline-flex items-center justify-center w-12 h-12 md:w-16 md:h-16 bg-amber-500 rounded-2xl mb-2 md:mb-4 shadow-lg shadow-amber-900/20">
+                <Database className="w-6 h-6 md:w-8 md:h-8 text-black" />
+              </div>
+              <h1 className="text-2xl md:text-3xl font-black tracking-tight text-white">啟動模擬器</h1>
+              <p className="text-slate-400 text-xs md:text-sm italic">請先配置模擬參數並上傳 CSV 數據</p>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-[10px] md:text-[11px] uppercase tracking-widest text-slate-500 font-bold mb-1.5">初始資金 (Capital)</label>
+                  <input 
+                    type="number" 
+                    value={initialBalance} 
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value) || 0;
+                      setInitialBalance(val);
+                      setBalance(val);
+                      setBaseBalance(val);
+                    }}
+                    className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-2 md:py-3 text-sm focus:outline-none focus:border-amber-500 transition-colors text-white" 
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] md:text-[11px] uppercase tracking-widest text-slate-500 font-bold mb-1.5">每點盈餘 (Multiplier)</label>
+                  <input 
+                    type="number" 
+                    value={multiplier} 
+                    onChange={(e) => setMultiplier(parseInt(e.target.value) || 1)}
+                    className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-2 md:py-3 text-sm focus:outline-none focus:border-amber-500 transition-colors text-white" 
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <label className="block text-[10px] md:text-[11px] uppercase tracking-widest text-slate-500 font-bold">均線設定 (MA Periods)</label>
+                  {maPeriods.length < 6 && (
+                    <button 
+                      onClick={() => setMaPeriods([...maPeriods, 5])}
+                      className="text-[10px] bg-blue-600/20 text-blue-400 px-2 py-1 rounded hover:bg-blue-600/40 transition-colors"
+                    >
+                      + 新增長度
+                    </button>
+                  )}
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {maPeriods.map((p, i) => (
+                    <div key={i} className="relative group">
+                      <input 
+                        type="number" 
+                        value={p}
+                        onChange={(e) => {
+                          const newPeriods = [...maPeriods];
+                          newPeriods[i] = parseInt(e.target.value) || 5;
+                          setMaPeriods(newPeriods);
+                        }}
+                        className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-2 py-2 text-[10px] focus:outline-none focus:border-blue-500 text-center text-white" 
+                      />
+                      <button 
+                        onClick={() => setMaPeriods(maPeriods.filter((_, index) => index !== i))}
+                        className="absolute -top-1 -right-1 w-4 h-4 bg-rose-500 text-white rounded-full text-[8px] flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                {maPeriods.length === 0 && (
+                  <p className="text-slate-600 text-[10px] italic text-center py-2">尚未設定均線</p>
+                )}
+              </div>
+            </div>
+
+            <div 
+              onClick={() => fileInputRef.current?.click()}
+              className="group relative cursor-pointer overflow-hidden rounded-2xl border-2 border-dashed border-slate-700 bg-slate-800/20 p-6 md:p-10 text-center transition-all hover:border-amber-500 hover:bg-slate-800/40"
+            >
+              <Upload className="mx-auto w-8 h-8 md:w-10 md:h-10 text-slate-600 mb-3 group-hover:text-amber-500 transition-colors" />
+              <p className="text-slate-400 text-xs md:text-sm font-medium">點擊或拖放 CSV 檔案</p>
+              <p className="text-slate-600 text-[9px] md:text-[10px] uppercase tracking-widest mt-2">Format: Date, Time, Open, High, Low, Close</p>
+              <input 
+                type="file" 
+                ref={fileInputRef} 
+                onChange={handleFileUpload} 
+                className="hidden" 
+                accept=".csv"
+              />
+            </div>
+          </div>
+        </div>
+      ) : (
+        // Simulation View
+        <>
+          {/* Top Header */}
+          <header className="h-14 border-b border-slate-800 flex items-center justify-between px-6 bg-slate-900/50 shrink-0">
+            <div className="flex items-center gap-4">
+              <div className="w-8 h-8 bg-amber-500 rounded flex items-center justify-center font-bold text-black shadow-[0_0_15px_rgba(245,158,11,0.3)]">AI</div>
+              <h1 className="text-lg font-bold tracking-tight">K-Sim <span className="font-light text-slate-400">Pro Investor</span></h1>
+            </div>
+            
+            <div className="flex gap-8 items-center">
+              <div className="hidden md:flex flex-col items-end">
+                <span className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">可用資金 (Cash)</span>
+                <span className="text-sm font-mono text-slate-400 font-bold">${balance.toLocaleString()}</span>
+              </div>
+              <div className="flex flex-col items-end">
+                <span className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">每點盈餘 (Point Val)</span>
+                <span className="text-sm font-mono text-amber-500 font-bold">x{multiplier}</span>
+              </div>
+              <div className="flex flex-col items-end">
+                <span className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">目前部位 (Position)</span>
+                <span className={cn(
+                  "text-sm font-mono font-bold",
+                  activePosition > 0 ? "text-rose-400" : activePosition < 0 ? "text-emerald-400" : "text-slate-400"
+                )}>
+                  {activePosition > 0 ? `+${activePosition}` : activePosition < 0 ? activePosition : '0'} UNIT{Math.abs(activePosition) !== 1 ? 'S' : ''}
+                </span>
+              </div>
+              <div className="flex flex-col items-end">
+                <span className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">目前盈虧 (PnL)</span>
+                <span className={cn(
+                  "text-sm font-mono font-bold",
+                  currentPnL > 0 ? "text-rose-500" : (currentPnL < 0 ? "text-emerald-400" : "text-slate-500")
+                )}>
+                  {currentPnL >= 0 ? '+' : ''}${currentPnL.toLocaleString()}
+                </span>
+              </div>
+              <div className="flex flex-col items-end border-l border-slate-800 pl-4 ml-2">
+                <span className="text-[10px] uppercase text-amber-500 font-bold tracking-wider">總資產 (Equity)</span>
+                <span className={cn(
+                  "text-sm font-mono font-bold",
+                  totalAssets > initialBalance ? "text-rose-500" : (totalAssets < initialBalance ? "text-emerald-400" : "text-slate-400")
+                )}>
+                  ${totalAssets.toLocaleString()}
+                </span>
+              </div>
+            </div>
+          </header>
+
+          <div className="flex-1 overflow-y-auto scroll-smooth">
+            <main className="flex flex-col min-h-full">
+              {/* Upper Section: Chart + Config */}
+              <div className="flex h-[75vh] min-h-[500px] shrink-0 border-b border-slate-800">
+                {/* Chart Area */}
+                <section className="flex-1 flex flex-col relative text-white bg-slate-900/10">
+                  <div className="p-4 border-b border-slate-800/50 flex justify-between items-center bg-slate-900/30">
+                    <div className="flex gap-4 items-center">
+                      <span className="text-xs text-slate-400 font-mono">SYMBOL: DATASET/SIM (1M)</span>
+                      <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] items-center">
+                        {currentMATrends.map((trend, i) => (
+                          <div key={i} className="flex items-center gap-1.5">
+                            <span className={cn(
+                              "font-bold",
+                              i === 0 ? "text-blue-400" : i === 1 ? "text-purple-400" : i === 2 ? "text-amber-400" : i === 3 ? "text-rose-400" : i === 4 ? "text-emerald-400" : "text-indigo-400"
+                            )}>MA({trend.period})</span>
+                            <span className={cn(
+                              "text-[10px] font-bold",
+                              trend.direction === MADirection.UP ? "text-rose-500" : 
+                              trend.direction === MADirection.DOWN ? "text-emerald-400" : "text-slate-500"
+                            )}>
+                              {trend.direction === MADirection.UP ? "▲" : trend.direction === MADirection.DOWN ? "▼" : "—"}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    {currentIndex !== -1 && (
+                      <div className="text-xs font-mono text-slate-400">
+                        {fullData[currentIndex].Date} <span className="text-slate-600">{fullData[currentIndex].Time}</span>
+                      </div>
+                    )}
+                  </div>
+                  
+                  <div className="flex-1 relative overflow-hidden bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] bg-opacity-5">
+                    <CandlestickChart 
+                      allData={fullData}
+                      startIndex={visibleStartIndex}
+                      endIndex={currentIndex}
+                      trades={trades} 
+                      maPeriods={maPeriods} 
+                    />
+                  </div>
+                </section>
+
+                {/* Config & Controls (Side Panel) */}
+                <aside className="w-[320px] bg-slate-900/60 flex flex-col border-l border-slate-800 shrink-0">
+                  <div className="p-6 flex flex-col gap-6 overflow-y-auto flex-1">
+                    <section className="space-y-4">
+                      <h3 className="text-[10px] uppercase tracking-widest text-slate-500 font-bold border-b border-slate-800 pb-2">Simulator Config</h3>
+                      <div>
+                        <label className="block text-[11px] text-slate-400 mb-1">部位數量 (Size)</label>
+                        <input 
+                          type="number" 
+                          value={positionSize} 
+                          onChange={(e) => setPositionSize(Math.max(1, parseInt(e.target.value) || 1))}
+                          className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-amber-500 transition-colors" 
+                        />
+                      </div>
+                    </section>
+
+                    <section className="flex flex-col gap-4">
+                      <h3 className="text-[10px] uppercase tracking-widest text-slate-500 font-bold border-b border-slate-800 pb-2">Trading Actions</h3>
+                      
+                      <button 
+                        onClick={handleNext}
+                        disabled={!fullData.length}
+                        className="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-black py-4 rounded-xl flex items-center justify-center gap-3 transition-all disabled:opacity-30 active:scale-[0.98] outline-none shadow-lg shadow-indigo-900/20"
+                      >
+                        下一步 (NEXT)
+                        <Play className="w-4 h-4 fill-current" />
+                      </button>
+
+                      <div className="grid grid-cols-2 gap-4">
+                        <button 
+                          onClick={() => executeTrade(TradeType.BUY)}
+                          className="bg-rose-600 hover:bg-rose-500 text-white font-bold py-4 rounded-lg shadow-xl shadow-rose-900/20 active:translate-y-0.5 transition-all outline-none"
+                        >
+                          買進 (BUY)
+                        </button>
+                        <button 
+                          onClick={() => executeTrade(TradeType.SELL)}
+                          className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-4 rounded-lg shadow-xl shadow-emerald-900/20 active:translate-y-0.5 transition-all outline-none"
+                        >
+                          賣出 (SELL)
+                        </button>
+                      </div>
+                    </section>
+
+                    <div className="mt-auto pt-6 border-t border-slate-800">
+                      <button 
+                        onClick={handleEndGame}
+                        className="w-full bg-slate-800 border border-slate-700 text-slate-400 hover:text-white hover:bg-slate-700 py-3 rounded-md text-xs font-bold tracking-widest transition-all flex items-center justify-center gap-2 outline-none uppercase"
+                      >
+                        <XCircle className="w-4 h-4" />
+                        分析結果 (ANALYSIS)
+                      </button>
+                    </div>
+                  </div>
+                </aside>
+              </div>
+
+              {/* Lower Section: Records */}
+              <footer className="p-10 bg-slate-950 flex flex-col gap-6 min-h-[400px]">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+                  <h3 className="text-sm uppercase tracking-widest text-slate-300 font-bold">Investment History</h3>
+                  <div className="text-[10px] text-slate-500 font-mono tracking-wider">TOTAL TRADES: {records.length} | ACTIVE POS: {activePosition} UNITS</div>
+                </div>
+                <div className="rounded-xl border border-slate-800 overflow-hidden bg-slate-900/10 shadow-2xl">
+                  <table className="w-full text-left text-xs font-mono">
+                    <thead className="bg-slate-900 text-slate-500">
+                      <tr>
+                        <th className="p-4 font-bold uppercase tracking-tighter">時間 (Time)</th>
+                        <th className="p-4 font-bold uppercase tracking-tighter">類型 (Type)</th>
+                        <th className="p-4 font-bold uppercase tracking-tighter">數量 (Size)</th>
+                        <th className="p-4 font-bold uppercase tracking-tighter text-center">趨勢 (Trend)</th>
+                        <th className="p-4 font-bold uppercase tracking-tighter text-right">實現盈虧 (Realized)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/30">
+                      {records.map((r) => (
+                        <tr key={r.id} className="hover:bg-slate-800/20 transition-colors">
+                          <td className="p-4 text-slate-400">{r.date} {r.time}</td>
+                          <td className="p-4">
+                            <span className={cn(
+                               "font-bold px-2 py-1 rounded text-[10px]",
+                               r.type === TradeType.BUY ? "bg-rose-500/10 text-rose-500 border border-rose-500/20" : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                             )}>{r.type}</span>
+                          </td>
+                          <td className="p-4 text-slate-300">{r.quantity} UNITS</td>
+                          <td className="p-4">
+                            <div className="flex items-center justify-center gap-2">
+                              {r.maTrends.map((trend, idx) => (
+                                <div 
+                                  key={idx} 
+                                  className={cn(
+                                    "flex flex-col items-center",
+                                    trend.direction === MADirection.UP ? "text-rose-500" : 
+                                    trend.direction === MADirection.DOWN ? "text-emerald-400" : "text-slate-500"
+                                  )}
+                                  title={`MA(${trend.period})`}
+                                >
+                                  <span className="text-xs">{trend.direction === MADirection.UP ? "▲" : trend.direction === MADirection.DOWN ? "▼" : "—"}</span>
+                                  <span className="text-[8px] font-mono leading-none opacity-60">{trend.period}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </td>
+                          <td className={cn(
+                            "p-4 text-right font-bold text-sm",
+                            r.profit !== null ? (r.profit > 0 ? "text-rose-500" : r.profit < 0 ? "text-emerald-400" : "text-slate-500") : "text-slate-500"
+                          )}>
+                            {r.profit !== null ? (r.profit > 0 ? `+$${r.profit.toLocaleString()}` : r.profit < 0 ? `-$${Math.abs(r.profit).toLocaleString()}` : `$0`) : '—'}
+                          </td>
+                        </tr>
+                      ))}
+                      {records.length === 0 && (
+                        <tr>
+                          <td colSpan={5} className="p-20 text-center text-slate-700 italic tracking-[0.2em] uppercase text-xs">No records found</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </footer>
+            </main>
+          </div>
+        </>
+      )}
+
+      {/* Analysis Modal */}
+      {analysis && (
+        <div className="fixed inset-0 flex items-center justify-center bg-slate-950/90 backdrop-blur-xl z-50 p-6">
+          <div className="bg-slate-900 w-full max-w-2xl rounded-2xl border border-slate-800 shadow-[0_0_50px_rgba(0,0,0,0.5)] flex flex-col max-h-[90vh]">
+            <div className="p-6 border-b border-slate-800 flex justify-between items-center bg-slate-900/50">
+              <h2 className="text-xl font-bold flex items-center gap-3">
+                <div className="w-2 h-6 bg-amber-500 rounded-full"></div>
+                TRADE PERFORMANCE REPORT
+              </h2>
+              <button 
+                onClick={() => setAnalysis(null)}
+                className="p-2 hover:bg-slate-800 rounded-full transition-colors text-slate-500 hover:text-white outline-none"
+              >
+                <XCircle className="w-6 h-6" />
+              </button>
+            </div>
+            <div className="p-8 overflow-y-auto text-slate-300 space-y-6">
+              <div className="bg-slate-950 border border-slate-800 p-6 rounded-xl space-y-4">
+                <div className="whitespace-pre-wrap font-sans leading-relaxed text-sm">
+                  {analysis}
+                </div>
+              </div>
+            </div>
+            <div className="p-6 border-t border-slate-800 flex justify-end gap-4">
+               <button 
+                onClick={() => setAnalysis(null)}
+                className="px-6 py-2 rounded-lg text-slate-400 hover:text-white transition-colors text-sm"
+              >
+                關閉
+              </button>
+              <button 
+                onClick={() => window.location.reload()}
+                className="bg-amber-500 text-black px-8 py-2 rounded-lg font-bold hover:bg-amber-400 transition-colors shadow-lg shadow-amber-900/20 text-sm outline-none"
+              >
+                RESTART SESSION
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isAnalyzing && (
+        <div className="fixed inset-0 flex items-center justify-center bg-slate-950/70 backdrop-blur-md z-[60]">
+          <div className="flex flex-col items-center gap-6">
+            <div className="relative">
+              <div className="w-16 h-16 border-2 border-slate-800 rounded-full"></div>
+              <div className="w-16 h-16 border-y-2 border-amber-500 rounded-full absolute top-0 left-0 animate-spin"></div>
+            </div>
+            <p className="text-amber-500 font-mono text-xs tracking-[0.3em] uppercase animate-pulse">Computing Strategy Analysis...</p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
