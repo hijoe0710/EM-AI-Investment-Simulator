@@ -30,6 +30,14 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+const EyeLogo = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
+    <rect width="64" height="64" rx="16" fill="#0A2458"/>
+    <path d="M58 32C58 32 48.5 45 32 45C15.5 45 6 32 6 32C6 32 15.5 19 32 19C48.5 19 58 32 58 32Z" fill="white"/>
+    <circle cx="32" cy="32" r="9" fill="#E69110"/>
+  </svg>
+);
+
 export default function App() {
   const [fullData, setFullData] = useState<Candle[]>([]);
   const [rawCSVData, setRawCSVData] = useState<Candle[]>([]);
@@ -370,9 +378,7 @@ export default function App() {
         <div className="flex-1 flex flex-col items-center overflow-y-auto bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 p-4 md:p-8">
           <div className="w-full max-w-xl bg-slate-900/50 backdrop-blur-xl border border-slate-800 p-6 md:p-10 rounded-3xl shadow-2xl flex flex-col gap-6 md:gap-8 my-auto">
             <div className="text-center space-y-2">
-              <div className="inline-flex items-center justify-center w-12 h-12 md:w-16 md:h-16 bg-amber-500 rounded-2xl mb-2 md:mb-4 shadow-lg shadow-amber-900/20">
-                <Database className="w-6 h-6 md:w-8 md:h-8 text-black" />
-              </div>
+              <EyeLogo className="w-12 h-12 md:w-16 md:h-16 mx-auto mb-2 md:mb-4 shadow-lg shadow-blue-900/20 rounded-2xl" />
               <h1 className="text-2xl md:text-3xl font-black tracking-tight text-white">啟動模擬器</h1>
               <p className="text-slate-400 text-xs md:text-sm italic">請先配置模擬參數並上傳 CSV 數據</p>
             </div>
@@ -486,8 +492,8 @@ export default function App() {
           {/* Top Header */}
           <header className="h-14 border-b border-slate-800 flex items-center justify-between px-6 bg-slate-900/50 shrink-0">
             <div className="flex items-center gap-4">
-              <div className="w-8 h-8 bg-amber-500 rounded flex items-center justify-center font-bold text-black shadow-[0_0_15px_rgba(245,158,11,0.3)]">AI</div>
-              <h1 className="text-lg font-bold tracking-tight">K-Sim <span className="font-light text-slate-400">Pro Investor</span></h1>
+              <EyeLogo className="w-8 h-8 rounded shadow-[0_0_15px_rgba(10,36,88,0.5)]" />
+              <h1 className="text-lg font-bold tracking-tight">EM AI <span className="font-light text-slate-400">Simulator</span></h1>
             </div>
             
             <div className="flex gap-8 items-center">
