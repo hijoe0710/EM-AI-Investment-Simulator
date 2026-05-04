@@ -154,10 +154,6 @@ export default function App() {
           return time >= w.s && time <= w.e;
         });
 
-        // Special handling for 00:00:00 which user said belongs to 23:01:00 window
-        // But 00:00:00 technically belongs to the "next" date in many CSVs
-        // Let's check if we should finalize previous chunk
-        
         const isSameWindow = foundIdx !== -1 && foundIdx === lastWindowIdx && (date === lastDate || (foundIdx === 13 && lastWindowIdx === 13));
 
         if (foundIdx !== -1) {
@@ -174,6 +170,28 @@ export default function App() {
           currentChunk = [];
           lastWindowIdx = -1;
           lastDate = '';
+        }
+      }
+      if (currentChunk.length > 0) processed.push(aggregate(currentChunk));
+    } else if (tf === Timeframe.D1) {
+      let currentChunk: Candle[] = [];
+      for (const candle of rawData) {
+        const time = candle.Time;
+        // 15:01:00 is the start of the "next" trading day session
+        if (time === '15:01:00') {
+          if (currentChunk.length > 0) processed.push(aggregate(currentChunk));
+          currentChunk = [candle];
+        } else {
+          // Include if in night session (15:01-23:59) or day session (00:00-13:45)
+          const inSession = time >= '15:01:00' || time <= '13:45:00';
+          if (inSession) {
+            currentChunk.push(candle);
+          }
+          // Close if we hit the end of day session
+          if (time === '13:45:00') {
+            if (currentChunk.length > 0) processed.push(aggregate(currentChunk));
+            currentChunk = [];
+          }
         }
       }
       if (currentChunk.length > 0) processed.push(aggregate(currentChunk));
@@ -377,8 +395,8 @@ export default function App() {
                 </div>
                 <div>
                   <label className="block text-[10px] md:text-[11px] uppercase tracking-widest text-slate-500 font-bold mb-1.5">投資週期 (Timeframe)</label>
-                  <div className="grid grid-cols-3 gap-2">
-                    {[Timeframe.M1, Timeframe.M5, Timeframe.M60].map((tf) => (
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                    {[Timeframe.M1, Timeframe.M5, Timeframe.M60, Timeframe.D1].map((tf) => (
                       <button
                         key={tf}
                         onClick={() => setTimeframe(tf)}
@@ -389,7 +407,7 @@ export default function App() {
                             : "bg-slate-800/50 border-slate-700 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
                         )}
                       >
-                        {tf === Timeframe.M1 ? "1分" : tf === Timeframe.M5 ? "5分" : "60分"}
+                        {tf === Timeframe.M1 ? "1分" : tf === Timeframe.M5 ? "5分" : tf === Timeframe.M60 ? "60分" : "1天"}
                       </button>
                     ))}
                   </div>
@@ -519,7 +537,7 @@ export default function App() {
                 <section className="flex-1 flex flex-col relative text-white bg-slate-900/10">
                   <div className="p-4 border-b border-slate-800/50 flex justify-between items-center bg-slate-900/30">
                     <div className="flex gap-4 items-center">
-                      <span className="text-xs text-slate-400 font-mono">SYMBOL: DATASET/SIM ({timeframe === Timeframe.M1 ? '1M' : '5M'})</span>
+                      <span className="text-xs text-slate-400 font-mono">SYMBOL: DATASET/SIM ({timeframe === Timeframe.M1 ? '1M' : timeframe === Timeframe.M5 ? '5M' : timeframe === Timeframe.M60 ? '60M' : '1D'})</span>
                       <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] items-center">
                         {currentMATrends.map((trend, i) => (
                           <div key={i} className="flex items-center gap-1.5">
