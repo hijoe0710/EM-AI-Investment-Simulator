@@ -1,4 +1,10 @@
 
+export enum Timeframe {
+  M1 = '1m',
+  M5 = '5m',
+  M60 = '60m'
+}
+
 export interface Candle {
   Date: string;
   Time: string;

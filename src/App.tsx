@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import Papa from 'papaparse';
+import ReactMarkdown from 'react-markdown';
 import { 
   Candle, 
   Trade, 
   TradeType, 
   TradeRecord, 
-  MADirection 
+  MADirection,
+  Timeframe
 } from './types';
 import { CandlestickChart } from './components/CandlestickChart';
 import { analyzePerformance } from './services/geminiService';
@@ -30,6 +32,8 @@ function cn(...inputs: ClassValue[]) {
 
 export default function App() {
   const [fullData, setFullData] = useState<Candle[]>([]);
+  const [rawCSVData, setRawCSVData] = useState<Candle[]>([]);
+  const [timeframe, setTimeframe] = useState<Timeframe>(Timeframe.M1);
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [visibleStartIndex, setVisibleStartIndex] = useState(0);
   const [balance, setBalance] = useState(1000000); // This now represents Liquid Cash
@@ -89,7 +93,7 @@ export default function App() {
       header: true,
       dynamicTyping: true,
       complete: (results) => {
-        const parsed = results.data
+        const parsed = (results.data as any[])
           .filter((row: any) => row.Date && row.Time && row.Open)
           .map((row: any) => ({
             ...row,
@@ -97,13 +101,99 @@ export default function App() {
           }))
           .sort((a: any, b: any) => a.timestamp - b.timestamp);
 
-        setFullData(parsed);
-        const startPoint = Math.min(parsed.length - 100, Math.floor(Math.random() * (parsed.length - 300)) + 250);
-        setCurrentIndex(startPoint);
-        setVisibleStartIndex(Math.max(0, startPoint - 80));
+        setRawCSVData(parsed);
+        applyTimeframe(parsed, timeframe);
       }
     });
   };
+
+  const applyTimeframe = (rawData: Candle[], tf: Timeframe) => {
+    let processed: Candle[] = [];
+    
+    const aggregate = (chunk: Candle[]): Candle => ({
+      Date: chunk[0].Date,
+      Time: chunk[chunk.length - 1].Time,
+      Open: chunk[0].Open,
+      High: Math.max(...chunk.map(c => c.High)),
+      Low: Math.min(...chunk.map(c => c.Low)),
+      Close: chunk[chunk.length - 1].Close,
+      Volume: chunk.reduce((sum, c) => sum + (c.Volume || 0), 0),
+      timestamp: chunk[0].timestamp
+    });
+
+    if (tf === Timeframe.M1) {
+      processed = rawData;
+    } else if (tf === Timeframe.M5) {
+      for (let i = 0; i < rawData.length; i += 5) {
+        const chunk = rawData.slice(i, i + 5);
+        if (chunk.length > 0) {
+          processed.push(aggregate(chunk));
+        }
+      }
+    } else if (tf === Timeframe.M60) {
+      const windows = [
+        { s: '08:46:00', e: '09:45:00' }, { s: '09:46:00', e: '10:45:00' }, { s: '10:46:00', e: '11:45:00' },
+        { s: '11:46:00', e: '12:45:00' }, { s: '12:46:00', e: '13:45:00' },
+        { s: '15:01:00', e: '16:00:00' }, { s: '16:01:00', e: '17:00:00' }, { s: '17:01:00', e: '18:00:00' },
+        { s: '18:01:00', e: '19:00:00' }, { s: '19:01:00', e: '20:00:00' }, { s: '20:01:00', e: '21:00:00' },
+        { s: '21:01:00', e: '22:00:00' }, { s: '22:01:00', e: '23:00:00' }, { s: '23:01:00', e: '00:00:00', cross: true },
+        { s: '00:01:00', e: '01:00:00' }, { s: '01:01:00', e: '02:00:00' }, { s: '02:01:00', e: '03:00:00' },
+        { s: '03:01:00', e: '04:00:00' }, { s: '04:01:00', e: '05:00:00' }
+      ];
+
+      let currentChunk: Candle[] = [];
+      let lastWindowIdx = -1;
+      let lastDate = '';
+
+      for (const candle of rawData) {
+        const time = candle.Time;
+        const date = candle.Date;
+        
+        let foundIdx = windows.findIndex(w => {
+          if (w.cross) return time >= w.s || time === '00:00:00';
+          return time >= w.s && time <= w.e;
+        });
+
+        // Special handling for 00:00:00 which user said belongs to 23:01:00 window
+        // But 00:00:00 technically belongs to the "next" date in many CSVs
+        // Let's check if we should finalize previous chunk
+        
+        const isSameWindow = foundIdx !== -1 && foundIdx === lastWindowIdx && (date === lastDate || (foundIdx === 13 && lastWindowIdx === 13));
+
+        if (foundIdx !== -1) {
+          if (isSameWindow) {
+            currentChunk.push(candle);
+          } else {
+            if (currentChunk.length > 0) processed.push(aggregate(currentChunk));
+            currentChunk = [candle];
+          }
+          lastWindowIdx = foundIdx;
+          lastDate = date;
+        } else {
+          if (currentChunk.length > 0) processed.push(aggregate(currentChunk));
+          currentChunk = [];
+          lastWindowIdx = -1;
+          lastDate = '';
+        }
+      }
+      if (currentChunk.length > 0) processed.push(aggregate(currentChunk));
+    }
+
+    setFullData(processed);
+    if (processed.length > 0) {
+      const startPoint = Math.min(processed.length - 1, Math.floor(Math.random() * (processed.length * 0.2)) + Math.floor(processed.length * 0.1));
+      // Ensure we have at least some history for MAs
+      const safeStart = Math.max(Math.min(processed.length - 1, 240), startPoint);
+      setCurrentIndex(safeStart);
+      setVisibleStartIndex(Math.max(0, safeStart - 80));
+    }
+  };
+
+  useEffect(() => {
+    if (rawCSVData.length > 0) {
+      applyTimeframe(rawCSVData, timeframe);
+    }
+  }, [timeframe]);
 
   const handleNext = () => {
     if (currentIndex < fullData.length - 1) {
@@ -286,6 +376,25 @@ export default function App() {
                   />
                 </div>
                 <div>
+                  <label className="block text-[10px] md:text-[11px] uppercase tracking-widest text-slate-500 font-bold mb-1.5">投資週期 (Timeframe)</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[Timeframe.M1, Timeframe.M5, Timeframe.M60].map((tf) => (
+                      <button
+                        key={tf}
+                        onClick={() => setTimeframe(tf)}
+                        className={cn(
+                          "py-2 md:py-3 rounded-xl text-xs font-bold transition-all border",
+                          timeframe === tf 
+                            ? "bg-amber-500 border-amber-600 text-black shadow-lg shadow-amber-900/20" 
+                            : "bg-slate-800/50 border-slate-700 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+                        )}
+                      >
+                        {tf === Timeframe.M1 ? "1分" : tf === Timeframe.M5 ? "5分" : "60分"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
                   <label className="block text-[10px] md:text-[11px] uppercase tracking-widest text-slate-500 font-bold mb-1.5">每點盈餘 (Multiplier)</label>
                   <input 
                     type="number" 
@@ -410,7 +519,7 @@ export default function App() {
                 <section className="flex-1 flex flex-col relative text-white bg-slate-900/10">
                   <div className="p-4 border-b border-slate-800/50 flex justify-between items-center bg-slate-900/30">
                     <div className="flex gap-4 items-center">
-                      <span className="text-xs text-slate-400 font-mono">SYMBOL: DATASET/SIM (1M)</span>
+                      <span className="text-xs text-slate-400 font-mono">SYMBOL: DATASET/SIM ({timeframe === Timeframe.M1 ? '1M' : '5M'})</span>
                       <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] items-center">
                         {currentMATrends.map((trend, i) => (
                           <div key={i} className="flex items-center gap-1.5">
@@ -590,8 +699,8 @@ export default function App() {
             </div>
             <div className="p-8 overflow-y-auto text-slate-300 space-y-6">
               <div className="bg-slate-950 border border-slate-800 p-6 rounded-xl space-y-4">
-                <div className="whitespace-pre-wrap font-sans leading-relaxed text-sm">
-                  {analysis}
+                <div className="markdown-body">
+                  <ReactMarkdown>{analysis}</ReactMarkdown>
                 </div>
               </div>
             </div>
