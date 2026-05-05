@@ -48,6 +48,7 @@ export default function App() {
   const [initialBalance, setInitialBalance] = useState(1000000);
   const [baseBalance, setBaseBalance] = useState(1000000);
   const [multiplier, setMultiplier] = useState(1);
+  const [marginPerLot, setMarginPerLot] = useState(100000); 
   const [positionSize, setPositionSize] = useState(1);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [records, setRecords] = useState<TradeRecord[]>([]);
@@ -55,6 +56,7 @@ export default function App() {
   const [averageEntryPrice, setAverageEntryPrice] = useState<number>(0);
   const [analysis, setAnalysis] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [showInsufficientBalanceAlert, setShowInsufficientBalanceAlert] = useState(false);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -65,9 +67,12 @@ export default function App() {
   const totalAssets = useMemo(() => {
     if (currentIndex === -1 || fullData.length === 0) return balance;
     const currentPrice = fullData[currentIndex].Close;
-    // Current assets = Cash (balance) + Market Value of open position (activePosition * price * multiplier)
-    return balance + (activePosition * currentPrice * multiplier);
-  }, [balance, activePosition, currentIndex, fullData, multiplier]);
+    
+    // In Margin Account: Equity = Cash Balance + Unrealized PnL
+    // Unrealized PnL = (Current Price - Avg Price) * Position * Multiplier
+    const unrealizedPnL = activePosition === 0 ? 0 : (currentPrice - averageEntryPrice) * activePosition * multiplier;
+    return balance + unrealizedPnL;
+  }, [balance, activePosition, averageEntryPrice, currentIndex, fullData, multiplier]);
 
   const currentPnL = useMemo(() => {
     if (activePosition === 0) return 0;
@@ -254,10 +259,19 @@ export default function App() {
     
     const candle = fullData[currentIndex];
     const tradePrice = candle.Close;
-    const tradeValue = tradePrice * positionSize * multiplier;
 
-    if (type === TradeType.BUY && balance < tradeValue) {
-      alert("現金不足！");
+    const nextPosition = activePosition + (type === TradeType.BUY ? positionSize : -positionSize);
+
+    // Calculate predicted balance after trade (to include realized profit if any)
+    let predictedProfit = 0;
+    if (!((activePosition >= 0 && type === TradeType.BUY) || (activePosition <= 0 && type === TradeType.SELL))) {
+      const qtyToClose = Math.min(Math.abs(activePosition), positionSize);
+      const unitProfit = activePosition > 0 ? (tradePrice - averageEntryPrice) : (averageEntryPrice - tradePrice);
+      predictedProfit = unitProfit * qtyToClose * multiplier;
+    }
+
+    if (balance + predictedProfit < Math.abs(nextPosition) * marginPerLot) {
+      setShowInsufficientBalanceAlert(true);
       return;
     }
 
@@ -287,6 +301,9 @@ export default function App() {
       // Handle floating point precision for $0
       if (Math.abs(realizedProfit) < 0.0001) realizedProfit = 0;
 
+      // Update cash balance with realized profit
+      setBalance(prev => prev + (realizedProfit || 0));
+
       // If we flipped the position (e.g. from +10 to -5)
       if (positionSize > Math.abs(activePosition)) {
         nextAvgPrice = tradePrice;
@@ -297,12 +314,6 @@ export default function App() {
     }
 
     setAverageEntryPrice(nextAvgPrice);
-
-    const transactionCashEffect = type === TradeType.BUY ? -tradeValue : tradeValue;
-    const newBalance = balance + transactionCashEffect;
-    setBalance(newBalance);
-
-    const nextPosition = activePosition + (type === TradeType.BUY ? positionSize : -positionSize);
 
     if (activePosition === 0 && nextPosition !== 0) {
       setBaseBalance(balance);
@@ -319,7 +330,10 @@ export default function App() {
       maTrends: maTrends
     };
 
-    const currentAssetsAtTrade = newBalance + (nextPosition * tradePrice * multiplier);
+    // Calculate equity after trade for history
+    const finalBalance = realizedProfit !== null ? balance + realizedProfit : balance;
+    const unrealizedAfter = nextPosition === 0 ? 0 : (tradePrice - nextAvgPrice) * nextPosition * multiplier;
+    const currentEquityAtTrade = finalBalance + unrealizedAfter;
 
     setTrades(prev => [...prev, newTrade]);
     
@@ -332,7 +346,7 @@ export default function App() {
         quantity: newTrade.quantity,
         maTrends: newTrade.maTrends,
         profit: realizedProfit,
-        totalBalance: currentAssetsAtTrade
+        totalBalance: currentEquityAtTrade
       },
       ...prev
     ]);
@@ -400,6 +414,27 @@ export default function App() {
                   />
                 </div>
                 <div>
+                  <label className="block text-[10px] md:text-[11px] uppercase tracking-widest text-slate-500 font-bold mb-1.5">單口保證金 (Margin/Lot)</label>
+                  <input 
+                    type="number" 
+                    value={marginPerLot} 
+                    onChange={(e) => setMarginPerLot(parseInt(e.target.value) || 0)}
+                    className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-2 md:py-3 text-sm focus:outline-none focus:border-amber-500 transition-colors text-white" 
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] md:text-[11px] uppercase tracking-widest text-slate-500 font-bold mb-1.5">每點盈餘 (Multiplier)</label>
+                  <input 
+                    type="number" 
+                    value={multiplier} 
+                    onChange={(e) => setMultiplier(parseInt(e.target.value) || 1)}
+                    className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-2 md:py-3 text-sm focus:outline-none focus:border-amber-500 transition-colors text-white" 
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div>
                   <label className="block text-[10px] md:text-[11px] uppercase tracking-widest text-slate-500 font-bold mb-1.5">投資週期 (Timeframe)</label>
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                     {[Timeframe.M1, Timeframe.M5, Timeframe.M60, Timeframe.D1].map((tf) => (
@@ -418,18 +453,6 @@ export default function App() {
                     ))}
                   </div>
                 </div>
-                <div>
-                  <label className="block text-[10px] md:text-[11px] uppercase tracking-widest text-slate-500 font-bold mb-1.5">每點盈餘 (Multiplier)</label>
-                  <input 
-                    type="number" 
-                    value={multiplier} 
-                    onChange={(e) => setMultiplier(parseInt(e.target.value) || 1)}
-                    className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-2 md:py-3 text-sm focus:outline-none focus:border-amber-500 transition-colors text-white" 
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-4">
                 <div className="flex items-center justify-between">
                   <label className="block text-[10px] md:text-[11px] uppercase tracking-widest text-slate-500 font-bold">均線設定 (MA Periods)</label>
                   {maPeriods.length < 6 && (
@@ -498,12 +521,14 @@ export default function App() {
             
             <div className="flex gap-8 items-center">
               <div className="hidden md:flex flex-col items-end">
-                <span className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">可用資金 (Cash)</span>
-                <span className="text-sm font-mono text-slate-400 font-bold">${balance.toLocaleString()}</span>
+                <span className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">戶口餘額 (Cash)</span>
+                <span className="text-sm font-mono text-slate-400 font-bold">${(balance - Math.abs(activePosition) * marginPerLot).toLocaleString()}</span>
               </div>
-              <div className="flex flex-col items-end">
-                <span className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">每點盈餘 (Point Val)</span>
-                <span className="text-sm font-mono text-amber-500 font-bold">x{multiplier}</span>
+              <div className="hidden lg:flex flex-col items-end">
+                <span className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">保證金佔用 (Margin)</span>
+                <span className="text-sm font-mono text-blue-400 font-bold">
+                  {Math.abs(activePosition) * marginPerLot} / {initialBalance}
+                </span>
               </div>
               <div className="flex flex-col items-end">
                 <span className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">目前部位 (Position)</span>
@@ -754,6 +779,27 @@ export default function App() {
               <div className="w-16 h-16 border-y-2 border-amber-500 rounded-full absolute top-0 left-0 animate-spin"></div>
             </div>
             <p className="text-amber-500 font-mono text-xs tracking-[0.3em] uppercase animate-pulse">Computing Strategy Analysis...</p>
+          </div>
+        </div>
+      )}
+
+      {/* Insufficient Balance Alert Modal */}
+      {showInsufficientBalanceAlert && (
+        <div className="fixed inset-0 flex items-center justify-center bg-slate-950/80 backdrop-blur-md z-[70] p-6">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 max-w-sm w-full shadow-2xl flex flex-col items-center gap-6 animate-in fade-in zoom-in duration-300">
+            <div className="w-16 h-16 bg-rose-500/10 rounded-full flex items-center justify-center border border-rose-500/20">
+              <XCircle className="w-8 h-8 text-rose-500" />
+            </div>
+            <div className="text-center space-y-2">
+              <h2 className="text-xl font-bold text-white">餘額不足</h2>
+              <p className="text-slate-400 text-sm">您的帳戶餘額不足以支付交易所須的保證金。</p>
+            </div>
+            <button 
+              onClick={() => setShowInsufficientBalanceAlert(false)}
+              className="w-full bg-slate-800 hover:bg-slate-700 text-white font-bold py-3 rounded-xl transition-all outline-none border border-slate-700"
+            >
+              OK
+            </button>
           </div>
         </div>
       )}
