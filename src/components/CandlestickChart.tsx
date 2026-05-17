@@ -103,11 +103,25 @@ export const CandlestickChart: React.FC<Props> = ({ allData, startIndex, endInde
     <div className="w-full h-full relative overflow-hidden flex flex-col group">
       {hoveredIndex !== null && data[hoveredIndex] && (
         <div className="absolute top-2 left-12 right-12 bg-slate-900/80 backdrop-blur-md px-3 py-1.5 rounded-lg border border-slate-700/50 text-[10px] md:text-xs font-mono flex flex-wrap gap-x-4 gap-y-1 z-10 shadow-xl pointer-events-none">
+          <div className="flex gap-1.5"><span className="text-blue-400 font-bold">{data[hoveredIndex].Date}</span> <span className="text-slate-400">{data[hoveredIndex].Time}</span></div>
           <div className="flex gap-1.5"><span className="text-slate-500 font-bold">O</span> <span className="text-slate-100 font-medium">{data[hoveredIndex].Open.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
           <div className="flex gap-1.5"><span className="text-slate-500 font-bold">H</span> <span className="text-rose-400 font-medium">{data[hoveredIndex].High.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
           <div className="flex gap-1.5"><span className="text-slate-500 font-bold">L</span> <span className="text-emerald-400 font-medium">{data[hoveredIndex].Low.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
           <div className="flex gap-1.5"><span className="text-slate-500 font-bold">C</span> <span className="text-slate-100 font-medium">{data[hoveredIndex].Close.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
           <div className="flex gap-1.5"><span className="text-slate-500 font-bold">V</span> <span className="text-amber-400 font-medium">{data[hoveredIndex].Volume?.toLocaleString()}</span></div>
+          {maPeriods.map((period, i) => {
+            const globalIndex = startIndex + hoveredIndex;
+            if (globalIndex < period - 1) return null;
+            const slice = allData.slice(globalIndex - period + 1, globalIndex + 1);
+            const avg = slice.reduce((sum, c) => sum + c.Close, 0) / period;
+            const colors = ['#60a5fa', '#a855f7', '#f59e0b', '#ef4444', '#10b981', '#6366f1'];
+            return (
+              <div key={period} className="flex gap-1.5">
+                <span className="font-bold" style={{ color: colors[i % 6] }}>MA{period}</span>
+                <span className="text-slate-100 font-medium">{avg.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</span>
+              </div>
+            );
+          })}
         </div>
       )}
       <svg 

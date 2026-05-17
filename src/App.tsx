@@ -56,6 +56,7 @@ export default function App() {
   const [averageEntryPrice, setAverageEntryPrice] = useState<number>(0);
   const [analysis, setAnalysis] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const [showInsufficientBalanceAlert, setShowInsufficientBalanceAlert] = useState(false);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -120,11 +121,45 @@ export default function App() {
     });
   };
 
+  const loadSampleData = async () => {
+    setIsLoading(true);
+    try {
+      const files = ['/TXF2021.csv', '/TXF2022.csv', '/TXF2023.csv'];
+      const randomFile = files[Math.floor(Math.random() * files.length)];
+      console.log(`Loading random dataset: ${randomFile}`);
+      
+      const response = await fetch(randomFile);
+      const csvText = await response.text();
+      
+      Papa.parse(csvText, {
+        header: true,
+        dynamicTyping: true,
+        complete: (results) => {
+          const parsed = (results.data as any[])
+            .filter((row: any) => row.Date && row.Time && row.Open)
+            .map((row: any) => ({
+              ...row,
+              timestamp: new Date(`${row.Date.replace(/\//g, '-')} ${row.Time}`).getTime()
+            }))
+            .sort((a: any, b: any) => a.timestamp - b.timestamp);
+
+          setRawCSVData(parsed);
+          applyTimeframe(parsed, timeframe);
+          setIsLoading(false);
+        }
+      });
+    } catch (error) {
+      console.error('Error loading sample data:', error);
+      setIsLoading(false);
+      alert('無法載入範例資料');
+    }
+  };
+
   const applyTimeframe = (rawData: Candle[], tf: Timeframe) => {
     let processed: Candle[] = [];
     
     const aggregate = (chunk: Candle[]): Candle => ({
-      Date: chunk[0].Date,
+      Date: chunk[chunk.length - 1].Date,
       Time: chunk[chunk.length - 1].Time,
       Open: chunk[0].Open,
       High: Math.max(...chunk.map(c => c.High)),
@@ -393,19 +428,19 @@ export default function App() {
           <div className="w-full max-w-xl bg-slate-900/50 backdrop-blur-xl border border-slate-800 p-6 md:p-10 rounded-3xl shadow-2xl flex flex-col gap-6 md:gap-8 my-auto">
             <div className="text-center space-y-2">
               <EyeLogo className="w-12 h-12 md:w-16 md:h-16 mx-auto mb-2 md:mb-4 shadow-lg shadow-blue-900/20 rounded-2xl" />
-              <h1 className="text-2xl md:text-3xl font-black tracking-tight text-white">啟動模擬器</h1>
-              <p className="text-slate-400 text-xs md:text-sm italic">請先配置模擬參數並上傳 CSV 數據</p>
+              <h1 className="text-2xl md:text-3xl font-black tracking-tight text-white">投資模擬器</h1>
+              <p className="text-slate-400 text-xs md:text-sm italic">請先配置模擬參數 均線可自由增減</p>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
               <div className="space-y-4">
                 <div>
-                  <label className="block text-[10px] md:text-[11px] uppercase tracking-widest text-slate-500 font-bold mb-1.5">初始資金 (Capital)</label>
+                  <label className="block text-[10px] md:text-[11px] uppercase tracking-widest text-slate-500 font-bold mb-1.5">初始資金 (單位: 萬)</label>
                   <input 
                     type="number" 
-                    value={initialBalance} 
+                    value={initialBalance / 10000} 
                     onChange={(e) => {
-                      const val = parseInt(e.target.value) || 0;
+                      const val = (parseFloat(e.target.value) || 0) * 10000;
                       setInitialBalance(val);
                       setBalance(val);
                       setBaseBalance(val);
@@ -414,11 +449,11 @@ export default function App() {
                   />
                 </div>
                 <div>
-                  <label className="block text-[10px] md:text-[11px] uppercase tracking-widest text-slate-500 font-bold mb-1.5">單口保證金 (Margin/Lot)</label>
+                  <label className="block text-[10px] md:text-[11px] uppercase tracking-widest text-slate-500 font-bold mb-1.5">單口保證金 (單位: 萬)</label>
                   <input 
                     type="number" 
-                    value={marginPerLot} 
-                    onChange={(e) => setMarginPerLot(parseInt(e.target.value) || 0)}
+                    value={marginPerLot / 10000} 
+                    onChange={(e) => setMarginPerLot((parseFloat(e.target.value) || 0) * 10000)}
                     className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-2 md:py-3 text-sm focus:outline-none focus:border-amber-500 transition-colors text-white" 
                   />
                 </div>
@@ -492,20 +527,22 @@ export default function App() {
               </div>
             </div>
 
-            <div 
-              onClick={() => fileInputRef.current?.click()}
-              className="group relative cursor-pointer overflow-hidden rounded-2xl border-2 border-dashed border-slate-700 bg-slate-800/20 p-6 md:p-10 text-center transition-all hover:border-amber-500 hover:bg-slate-800/40"
-            >
-              <Upload className="mx-auto w-8 h-8 md:w-10 md:h-10 text-slate-600 mb-3 group-hover:text-amber-500 transition-colors" />
-              <p className="text-slate-400 text-xs md:text-sm font-medium">點擊或拖放 CSV 檔案</p>
-              <p className="text-slate-600 text-[9px] md:text-[10px] uppercase tracking-widest mt-2">Format: Date, Time, Open, High, Low, Close</p>
-              <input 
-                type="file" 
-                ref={fileInputRef} 
-                onChange={handleFileUpload} 
-                className="hidden" 
-                accept=".csv"
-              />
+            <div className="flex flex-col gap-4">
+              <button
+                onClick={loadSampleData}
+                disabled={isLoading}
+                className="w-full bg-amber-500 hover:bg-amber-400 text-black font-black py-4 rounded-2xl flex items-center justify-center gap-3 transition-all active:scale-[0.98] shadow-lg shadow-amber-900/40 relative overflow-hidden group"
+              >
+                <div className="absolute inset-0 bg-white/20 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-500 ease-in-out"></div>
+                {isLoading ? (
+                  <div className="w-5 h-5 border-2 border-black/30 border-t-black rounded-full animate-spin"></div>
+                ) : (
+                  <>
+                    <Database className="w-5 h-5" />
+                    <span className="text-lg">開始回測</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
         </div>
@@ -575,7 +612,7 @@ export default function App() {
                             <span className={cn(
                               "font-bold",
                               i === 0 ? "text-blue-400" : i === 1 ? "text-purple-400" : i === 2 ? "text-amber-400" : i === 3 ? "text-rose-400" : i === 4 ? "text-emerald-400" : "text-indigo-400"
-                            )}>MA({trend.period})</span>
+                            )}>MA({trend.period}): <span className="text-slate-100 font-mono">{trend.value.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</span></span>
                             <span className={cn(
                               "text-[10px] font-bold",
                               trend.direction === MADirection.UP ? "text-rose-500" : 
@@ -767,6 +804,18 @@ export default function App() {
                 RESTART SESSION
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {isLoading && (
+        <div className="fixed inset-0 flex items-center justify-center bg-slate-950/70 backdrop-blur-md z-[60]">
+          <div className="flex flex-col items-center gap-6">
+            <div className="relative">
+              <div className="w-16 h-16 border-2 border-slate-800 rounded-full"></div>
+              <div className="w-16 h-16 border-y-2 border-amber-500 rounded-full absolute top-0 left-0 animate-spin"></div>
+            </div>
+            <p className="text-amber-500 font-mono text-xs tracking-[0.3em] uppercase animate-pulse">Loading Market Data...</p>
           </div>
         </div>
       )}
