@@ -49,6 +49,7 @@ export interface TradeRecord {
   date: string;
   time: string;
   type: TradeType;
+  category: '新倉' | '平倉';
   quantity: number;
   maTrends: MATrend[];
   profit: number | null;

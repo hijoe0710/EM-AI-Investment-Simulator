@@ -21,7 +21,8 @@ import {
   Wallet,
   History,
   XCircle,
-  Database
+  Database,
+  Home
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -44,6 +45,8 @@ export default function App() {
   const [timeframe, setTimeframe] = useState<Timeframe>(Timeframe.M1);
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [visibleStartIndex, setVisibleStartIndex] = useState(0);
+  const [isAutoScroll, setIsAutoScroll] = useState(true);
+  const VIEWPORT_SIZE = 80;
   const [balance, setBalance] = useState(1000000); // This now represents Liquid Cash
   const [initialBalance, setInitialBalance] = useState(1000000);
   const [baseBalance, setBaseBalance] = useState(1000000);
@@ -74,6 +77,16 @@ export default function App() {
     const unrealizedPnL = activePosition === 0 ? 0 : (currentPrice - averageEntryPrice) * activePosition * multiplier;
     return balance + unrealizedPnL;
   }, [balance, activePosition, averageEntryPrice, currentIndex, fullData, multiplier]);
+
+  const maxAllowedPosition = useMemo(() => {
+    return Math.max(1, Math.floor(totalAssets / marginPerLot) * 2);
+  }, [totalAssets, marginPerLot]);
+
+  useEffect(() => {
+    if (positionSize > maxAllowedPosition) {
+      setPositionSize(maxAllowedPosition);
+    }
+  }, [maxAllowedPosition, positionSize]);
 
   const currentPnL = useMemo(() => {
     if (activePosition === 0) return 0;
@@ -128,7 +141,7 @@ export default function App() {
       const randomFile = files[Math.floor(Math.random() * files.length)];
       console.log(`Loading random dataset: ${randomFile}`);
       
-      const response = await fetch(`${import.meta.env.BASE_URL}${randomFile}`);
+      const response = await fetch(randomFile);
       const csvText = await response.text();
       
       Papa.parse(csvText, {
@@ -251,7 +264,9 @@ export default function App() {
       // Ensure we have at least some history for MAs
       const safeStart = Math.max(Math.min(processed.length - 1, 240), startPoint);
       setCurrentIndex(safeStart);
-      setVisibleStartIndex(Math.max(0, safeStart - 80));
+      const startIdx = Math.max(0, safeStart - VIEWPORT_SIZE);
+      setVisibleStartIndex(startIdx);
+      setIsAutoScroll(true);
     }
   };
 
@@ -263,9 +278,13 @@ export default function App() {
 
   const handleNext = () => {
     if (currentIndex < fullData.length - 1) {
-      setCurrentIndex(prev => prev + 1);
-      if (currentIndex - visibleStartIndex > 80) {
-        setVisibleStartIndex(prev => prev + 1);
+      const nextIndex = currentIndex + 1;
+      setCurrentIndex(nextIndex);
+      
+      if (isAutoScroll) {
+        if (nextIndex - visibleStartIndex >= VIEWPORT_SIZE) {
+          setVisibleStartIndex(nextIndex - VIEWPORT_SIZE + 1);
+        }
       }
     }
   };
@@ -313,8 +332,10 @@ export default function App() {
     const maTrends = getMATrends(currentIndex);
     
     // Calculate realized profit and update average entry price
-    let realizedProfit: number | null = null;
     let nextAvgPrice = averageEntryPrice;
+    let realizedProfit: number | null = null;
+    let currentBalance = balance;
+    const newRecords: TradeRecord[] = [];
 
     // Determine if we are adding to position or reducing/flipping
     const isAdding = (activePosition >= 0 && type === TradeType.BUY) || (activePosition <= 0 && type === TradeType.SELL);
@@ -323,37 +344,76 @@ export default function App() {
       // Adding to position (or opening new)
       const currentAbsPos = Math.abs(activePosition);
       nextAvgPrice = (currentAbsPos * averageEntryPrice + positionSize * tradePrice) / (currentAbsPos + positionSize);
+      
+      newRecords.push({
+        id: Math.random().toString(36).substr(2, 9),
+        date: candle.Date,
+        time: candle.Time,
+        type: type,
+        category: '新倉',
+        quantity: positionSize,
+        maTrends: maTrends,
+        profit: null,
+        totalBalance: 0 // Will update below
+      });
     } else {
       // Reducing or flipping position
       const qtyToClose = Math.min(Math.abs(activePosition), positionSize);
       
-      // Profit formula: 
-      // Long: (SellPrice - AvgPrice) * Qty
-      // Short: (AvgPrice - BuyPrice) * Qty
       const unitProfit = activePosition > 0 ? (tradePrice - averageEntryPrice) : (averageEntryPrice - tradePrice);
       realizedProfit = unitProfit * qtyToClose * multiplier;
       
       // Handle floating point precision for $0
       if (Math.abs(realizedProfit) < 0.0001) realizedProfit = 0;
 
-      // Update cash balance with realized profit
-      setBalance(prev => prev + (realizedProfit || 0));
+      // Update cash balance with realized profit for calculation
+      currentBalance += realizedProfit;
 
-      // If we flipped the position (e.g. from +10 to -5)
+      // Create "平倉" record
+      newRecords.push({
+        id: Math.random().toString(36).substr(2, 9),
+        date: candle.Date,
+        time: candle.Time,
+        type: type,
+        category: '平倉',
+        quantity: qtyToClose,
+        maTrends: maTrends,
+        profit: realizedProfit,
+        totalBalance: 0 // Will update below
+      });
+
+      // If we flipped the position
       if (positionSize > Math.abs(activePosition)) {
+        const remainingQty = positionSize - Math.abs(activePosition);
         nextAvgPrice = tradePrice;
+        
+        // Create "新倉" record for the flip balance
+        newRecords.push({
+          id: Math.random().toString(36).substr(2, 9),
+          date: candle.Date,
+          time: candle.Time,
+          type: type,
+          category: '新倉',
+          quantity: remainingQty,
+          maTrends: maTrends,
+          profit: null,
+          totalBalance: 0 // Will update below
+        });
       } else if (positionSize === Math.abs(activePosition)) {
         nextAvgPrice = 0;
       }
       // If we reduced but stayed same direction, nextAvgPrice stays same
     }
 
+    // Apply finalized values
+    setBalance(currentBalance);
     setAverageEntryPrice(nextAvgPrice);
 
     if (activePosition === 0 && nextPosition !== 0) {
-      setBaseBalance(balance);
+      setBaseBalance(currentBalance);
     }
 
+    // Add to trades (for chart markers)
     const newTrade: Trade = {
       id: Math.random().toString(36).substr(2, 9),
       timestamp: candle.timestamp,
@@ -364,27 +424,19 @@ export default function App() {
       quantity: positionSize,
       maTrends: maTrends
     };
-
-    // Calculate equity after trade for history
-    const finalBalance = realizedProfit !== null ? balance + realizedProfit : balance;
-    const unrealizedAfter = nextPosition === 0 ? 0 : (tradePrice - nextAvgPrice) * nextPosition * multiplier;
-    const currentEquityAtTrade = finalBalance + unrealizedAfter;
-
     setTrades(prev => [...prev, newTrade]);
-    
-      setRecords(prev => [
-      {
-        id: newTrade.id,
-        date: newTrade.date,
-        time: newTrade.time,
-        type: newTrade.type,
-        quantity: newTrade.quantity,
-        maTrends: newTrade.maTrends,
-        profit: realizedProfit,
-        totalBalance: currentEquityAtTrade
-      },
-      ...prev
-    ]);
+
+    // Update records with correct equity and push to state
+    const processedRecords = newRecords.map((rec, i) => {
+      // For flipped records, the equity remains similar at that instant
+      // but we can be more precise if needed. 
+      // For simplicity, we use the equity at the end of the full action
+      const unrealizedAfter = nextPosition === 0 ? 0 : (tradePrice - nextAvgPrice) * nextPosition * multiplier;
+      const currentEquityAtTrade = currentBalance + unrealizedAfter;
+      return { ...rec, totalBalance: currentEquityAtTrade };
+    });
+
+    setRecords(prev => [...processedRecords.reverse(), ...prev]);
 
     handleNext();
   };
@@ -418,6 +470,20 @@ export default function App() {
     const analysisResult = await analyzePerformance(records, totalAssets, initialBalance);
     setAnalysis(analysisResult);
     setIsAnalyzing(false);
+  };
+
+  const resetToInitial = () => {
+    setRawCSVData([]);
+    setFullData([]);
+    setCurrentIndex(-1);
+    setVisibleStartIndex(0);
+    setIsAutoScroll(true);
+    setTrades([]);
+    setRecords([]);
+    setAnalysis(null);
+    setBalance(initialBalance);
+    setBaseBalance(initialBalance);
+    setAverageEntryPrice(0);
   };
 
   return (
@@ -559,12 +625,12 @@ export default function App() {
             <div className="flex gap-8 items-center">
               <div className="hidden md:flex flex-col items-end">
                 <span className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">戶口餘額 (Cash)</span>
-                <span className="text-sm font-mono text-slate-400 font-bold">${(balance - Math.abs(activePosition) * marginPerLot).toLocaleString()}</span>
+                <span className="text-sm font-mono text-slate-400 font-bold">${Math.round(balance - Math.abs(activePosition) * marginPerLot).toLocaleString()}</span>
               </div>
               <div className="hidden lg:flex flex-col items-end">
                 <span className="text-[10px] uppercase text-slate-500 font-bold tracking-wider">保證金佔用 (Margin)</span>
                 <span className="text-sm font-mono text-blue-400 font-bold">
-                  {Math.abs(activePosition) * marginPerLot} / {initialBalance}
+                  {Math.round(Math.abs(activePosition) * marginPerLot).toLocaleString()} / {Math.round(initialBalance).toLocaleString()}
                 </span>
               </div>
               <div className="flex flex-col items-end">
@@ -582,7 +648,7 @@ export default function App() {
                   "text-sm font-mono font-bold",
                   currentPnL > 0 ? "text-rose-500" : (currentPnL < 0 ? "text-emerald-400" : "text-slate-500")
                 )}>
-                  {currentPnL >= 0 ? '+' : ''}${currentPnL.toLocaleString()}
+                  {currentPnL >= 0 ? '+' : ''}${Math.round(currentPnL).toLocaleString()}
                 </span>
               </div>
               <div className="flex flex-col items-end border-l border-slate-800 pl-4 ml-2">
@@ -591,7 +657,7 @@ export default function App() {
                   "text-sm font-mono font-bold",
                   totalAssets > initialBalance ? "text-rose-500" : (totalAssets < initialBalance ? "text-emerald-400" : "text-slate-400")
                 )}>
-                  ${totalAssets.toLocaleString()}
+                  ${Math.round(totalAssets).toLocaleString()}
                 </span>
               </div>
             </div>
@@ -612,7 +678,7 @@ export default function App() {
                             <span className={cn(
                               "font-bold",
                               i === 0 ? "text-blue-400" : i === 1 ? "text-purple-400" : i === 2 ? "text-amber-400" : i === 3 ? "text-rose-400" : i === 4 ? "text-emerald-400" : "text-indigo-400"
-                            )}>MA({trend.period}): <span className="text-slate-100 font-mono">{trend.value.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</span></span>
+                            )}>MA({trend.period}): <span className="text-slate-100 font-mono">{Math.round(trend.value).toLocaleString()}</span></span>
                             <span className={cn(
                               "text-[10px] font-bold",
                               trend.direction === MADirection.UP ? "text-rose-500" : 
@@ -635,10 +701,33 @@ export default function App() {
                     <CandlestickChart 
                       allData={fullData}
                       startIndex={visibleStartIndex}
-                      endIndex={currentIndex}
+                      endIndex={isAutoScroll ? currentIndex : Math.min(visibleStartIndex + VIEWPORT_SIZE - 1, currentIndex)}
                       trades={trades} 
                       maPeriods={maPeriods} 
+                      onScroll={(newStart) => {
+                        const maxStart = Math.max(0, currentIndex - VIEWPORT_SIZE + 1);
+                        const constrainedStart = Math.max(0, Math.min(newStart, maxStart));
+                        setVisibleStartIndex(constrainedStart);
+                        // If we scrolled to the very end or beyond, re-enable auto-scroll
+                        if (constrainedStart >= maxStart) {
+                          setIsAutoScroll(true);
+                        } else {
+                          setIsAutoScroll(false);
+                        }
+                      }}
                     />
+                    {!isAutoScroll && (
+                      <button 
+                        onClick={() => {
+                          setIsAutoScroll(true);
+                          setVisibleStartIndex(Math.max(0, currentIndex - VIEWPORT_SIZE + 1));
+                        }}
+                        className="absolute bottom-4 right-4 bg-amber-500 hover:bg-amber-400 text-black px-4 py-2 rounded-full text-xs font-bold shadow-lg shadow-amber-900/40 z-20 flex items-center gap-2"
+                      >
+                        <Play className="w-3 h-3 fill-current" />
+                        回到最新 (BACK TO LATEST)
+                      </button>
+                    )}
                   </div>
                 </section>
 
@@ -647,13 +736,19 @@ export default function App() {
                   <div className="p-6 flex flex-col gap-6 overflow-y-auto flex-1">
                     <section className="space-y-4">
                       <h3 className="text-[10px] uppercase tracking-widest text-slate-500 font-bold border-b border-slate-800 pb-2">Simulator Config</h3>
-                      <div>
-                        <label className="block text-[11px] text-slate-400 mb-1">部位數量 (Size)</label>
+                      <div className="flex flex-col gap-2">
+                        <div className="flex justify-between items-center">
+                          <label className="block text-[11px] text-slate-400">部位數量 (Size)</label>
+                          <span className="text-xs font-mono text-amber-500 font-bold">{positionSize}</span>
+                        </div>
                         <input 
-                          type="number" 
+                          type="range" 
+                          min="1"
+                          max={maxAllowedPosition}
+                          step="1"
                           value={positionSize} 
-                          onChange={(e) => setPositionSize(Math.max(1, parseInt(e.target.value) || 1))}
-                          className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-amber-500 transition-colors" 
+                          onChange={(e) => setPositionSize(Math.min(maxAllowedPosition, parseInt(e.target.value)))}
+                          className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500 transition-all hover:bg-slate-700" 
                         />
                       </div>
                     </section>
@@ -686,13 +781,21 @@ export default function App() {
                       </div>
                     </section>
 
-                    <div className="mt-auto pt-6 border-t border-slate-800">
+                    <div className="mt-auto pt-6 border-t border-slate-800 space-y-4">
                       <button 
                         onClick={handleEndGame}
                         className="w-full bg-slate-800 border border-slate-700 text-slate-400 hover:text-white hover:bg-slate-700 py-3 rounded-md text-xs font-bold tracking-widest transition-all flex items-center justify-center gap-2 outline-none uppercase"
                       >
                         <XCircle className="w-4 h-4" />
                         分析結果 (ANALYSIS)
+                      </button>
+
+                      <button 
+                        onClick={resetToInitial}
+                        className="w-full bg-slate-900 border border-slate-800 text-slate-600 hover:text-slate-400 hover:bg-slate-800 py-3 rounded-md text-[10px] font-bold tracking-widest transition-all flex items-center justify-center gap-2 outline-none uppercase"
+                      >
+                        <Home className="w-3.5 h-3.5" />
+                        返回首頁 (BACK TO HOME)
                       </button>
                     </div>
                   </div>
@@ -721,10 +824,20 @@ export default function App() {
                         <tr key={r.id} className="hover:bg-slate-800/20 transition-colors">
                           <td className="p-4 text-slate-400">{r.date} {r.time}</td>
                           <td className="p-4">
-                            <span className={cn(
-                               "font-bold px-2 py-1 rounded text-[10px]",
-                               r.type === TradeType.BUY ? "bg-rose-500/10 text-rose-500 border border-rose-500/20" : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                             )}>{r.type}</span>
+                            <div className="flex items-center gap-2">
+                              <span className={cn(
+                                "font-bold px-2 py-1 rounded text-[10px] uppercase",
+                                r.type === TradeType.BUY ? "bg-rose-500/10 text-rose-500 border border-rose-500/20" : "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                              )}>
+                                {r.type === TradeType.BUY ? '買' : '賣'}
+                              </span>
+                              <span className={cn(
+                                "font-bold px-2 py-1 rounded text-[10px]",
+                                r.category === '新倉' ? "bg-blue-500/10 text-blue-400 border border-blue-500/20" : "bg-amber-500/10 text-amber-500 border border-amber-500/20"
+                              )}>
+                                {r.category}
+                              </span>
+                            </div>
                           </td>
                           <td className="p-4 text-slate-300">{r.quantity} UNITS</td>
                           <td className="p-4">
@@ -749,7 +862,7 @@ export default function App() {
                             "p-4 text-right font-bold text-sm",
                             r.profit !== null ? (r.profit > 0 ? "text-rose-500" : r.profit < 0 ? "text-emerald-400" : "text-slate-500") : "text-slate-500"
                           )}>
-                            {r.profit !== null ? (r.profit > 0 ? `+$${r.profit.toLocaleString()}` : r.profit < 0 ? `-$${Math.abs(r.profit).toLocaleString()}` : `$0`) : '—'}
+                            {r.profit !== null ? (r.profit > 0 ? `+$${Math.round(r.profit).toLocaleString()}` : r.profit < 0 ? `-$${Math.round(Math.abs(r.profit)).toLocaleString()}` : `$0`) : '—'}
                           </td>
                         </tr>
                       ))}

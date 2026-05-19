@@ -6,14 +6,14 @@ export async function analyzePerformance(records: TradeRecord[], finalBalance: n
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   
   const historyStr = records.map(r => 
-    `Date: ${r.date} ${r.time}, Action: ${r.type}, Qty: ${r.quantity}, MA Trends: [${r.maTrends.map(t => `${t.period}MA:${t.direction}`).join(', ')}], Profit: ${r.profit ?? 'N/A'}`
+    `Date: ${r.date} ${r.time}, Action: ${r.category} (${r.type}), Qty: ${r.quantity}, MA Trends: [${r.maTrends.map(t => `${t.period}MA:${t.direction}`).join(', ')}], Profit: ${r.profit !== null ? Math.round(r.profit) : 'N/A'}`
   ).join('\n');
 
   const prompt = `
     You are a professional trading mentor. Analyze the following trading simulation session:
-    Initial Balance: ${initialBalance}
-    Final Balance: ${finalBalance}
-    Total Profit/Loss: ${finalBalance - initialBalance}
+    Initial Balance: ${Math.round(initialBalance)}
+    Final Balance: ${Math.round(finalBalance)}
+    Total Profit/Loss: ${Math.round(finalBalance - initialBalance)}
 
     Transaction History:
     ${historyStr}
@@ -24,6 +24,7 @@ export async function analyzePerformance(records: TradeRecord[], finalBalance: n
     3. Why the user might have lost money (weaknesses).
     4. Strategic advice for future trading.
 
+    Important: All numeric values (prices, money, profit) mentioned in your analysis must be whole numbers (integers, no decimal points).
     Please respond in Traditional Chinese (繁體中文).
   `;
 

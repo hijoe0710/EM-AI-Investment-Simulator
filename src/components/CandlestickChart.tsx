@@ -8,9 +8,10 @@ interface Props {
   endIndex: number;
   trades: Trade[];
   maPeriods: number[];
+  onScroll?: (newStartIndex: number) => void;
 }
 
-export const CandlestickChart: React.FC<Props> = ({ allData, startIndex, endIndex, trades, maPeriods }) => {
+export const CandlestickChart: React.FC<Props> = ({ allData, startIndex, endIndex, trades, maPeriods, onScroll }) => {
   const width = 800;
   const height = 400;
   const padding = { top: 20, right: 50, bottom: 30, left: 50 };
@@ -54,7 +55,9 @@ export const CandlestickChart: React.FC<Props> = ({ allData, startIndex, endInde
   };
 
   const getX = (index: number) => {
-    return padding.left + (index / Math.max(1, data.length - 1)) * chartWidth;
+    // If we have fewer candles than expected viewport (e.g. 80), don't stretch them too much
+    // Or just keep the logic same
+    return padding.left + (index / Math.max(79, data.length - 1)) * chartWidth;
   };
 
   // Calculate MAs using the full data context
@@ -75,8 +78,31 @@ export const CandlestickChart: React.FC<Props> = ({ allData, startIndex, endInde
   }, [allData, startIndex, data, maPeriods, minPrice, maxPrice]);
 
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStartX, setDragStartX] = useState<number | null>(null);
+  const [initialScrollIndex, setInitialScrollIndex] = useState<number>(startIndex);
+
+  const handleMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
+    setIsDragging(true);
+    setDragStartX(e.clientX);
+    setInitialScrollIndex(startIndex);
+  };
 
   const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (isDragging && dragStartX !== null && onScroll) {
+      const deltaX = e.clientX - dragStartX;
+      // Calculate how many candles deltaX represents
+      const candlePxWidth = chartWidth / 80;
+      const indexDelta = Math.round(deltaX / candlePxWidth);
+      
+      const newStart = Math.max(0, initialScrollIndex - indexDelta);
+      // Don't scroll past current data
+      const maxStart = Math.max(0, (allData.findIndex(c => c.timestamp === allData[endIndex]?.timestamp) || 0));
+      // Actually, just let it scroll. App will handle constraints if needed.
+      onScroll(newStart);
+      return;
+    }
+
     const rect = e.currentTarget.getBoundingClientRect();
     const svgX = ((e.clientX - rect.left) / rect.width) * width;
     
@@ -95,20 +121,39 @@ export const CandlestickChart: React.FC<Props> = ({ allData, startIndex, endInde
     }
   };
 
-  const handleMouseLeave = () => {
-    setHoveredIndex(null);
+  const handleMouseUp = () => {
+    setIsDragging(false);
+    setDragStartX(null);
   };
 
+  const handleMouseLeave = () => {
+    if (!isDragging) {
+      setHoveredIndex(null);
+    }
+  };
+
+  const handleGlobalMouseUp = () => {
+    if (isDragging) {
+      setIsDragging(false);
+      setDragStartX(null);
+    }
+  };
+
+  React.useEffect(() => {
+    window.addEventListener('mouseup', handleGlobalMouseUp);
+    return () => window.removeEventListener('mouseup', handleGlobalMouseUp);
+  }, [isDragging]);
+
   return (
-    <div className="w-full h-full relative overflow-hidden flex flex-col group">
+    <div className="w-full h-full relative overflow-hidden flex flex-col group select-none">
       {hoveredIndex !== null && data[hoveredIndex] && (
         <div className="absolute top-2 left-12 right-12 bg-slate-900/80 backdrop-blur-md px-3 py-1.5 rounded-lg border border-slate-700/50 text-[10px] md:text-xs font-mono flex flex-wrap gap-x-4 gap-y-1 z-10 shadow-xl pointer-events-none">
           <div className="flex gap-1.5"><span className="text-blue-400 font-bold">{data[hoveredIndex].Date}</span> <span className="text-slate-400">{data[hoveredIndex].Time}</span></div>
-          <div className="flex gap-1.5"><span className="text-slate-500 font-bold">O</span> <span className="text-slate-100 font-medium">{data[hoveredIndex].Open.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
-          <div className="flex gap-1.5"><span className="text-slate-500 font-bold">H</span> <span className="text-rose-400 font-medium">{data[hoveredIndex].High.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
-          <div className="flex gap-1.5"><span className="text-slate-500 font-bold">L</span> <span className="text-emerald-400 font-medium">{data[hoveredIndex].Low.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
-          <div className="flex gap-1.5"><span className="text-slate-500 font-bold">C</span> <span className="text-slate-100 font-medium">{data[hoveredIndex].Close.toLocaleString(undefined, { minimumFractionDigits: 2 })}</span></div>
-          <div className="flex gap-1.5"><span className="text-slate-500 font-bold">V</span> <span className="text-amber-400 font-medium">{data[hoveredIndex].Volume?.toLocaleString()}</span></div>
+          <div className="flex gap-1.5"><span className="text-slate-500 font-bold">O</span> <span className="text-slate-100 font-medium">{Math.round(data[hoveredIndex].Open).toLocaleString()}</span></div>
+          <div className="flex gap-1.5"><span className="text-slate-500 font-bold">H</span> <span className="text-rose-400 font-medium">{Math.round(data[hoveredIndex].High).toLocaleString()}</span></div>
+          <div className="flex gap-1.5"><span className="text-slate-500 font-bold">L</span> <span className="text-emerald-400 font-medium">{Math.round(data[hoveredIndex].Low).toLocaleString()}</span></div>
+          <div className="flex gap-1.5"><span className="text-slate-500 font-bold">C</span> <span className="text-slate-100 font-medium">{Math.round(data[hoveredIndex].Close).toLocaleString()}</span></div>
+          <div className="flex gap-1.5"><span className="text-slate-500 font-bold">V</span> <span className="text-amber-400 font-medium">{Math.round(data[hoveredIndex].Volume || 0).toLocaleString()}</span></div>
           {maPeriods.map((period, i) => {
             const globalIndex = startIndex + hoveredIndex;
             if (globalIndex < period - 1) return null;
@@ -118,7 +163,7 @@ export const CandlestickChart: React.FC<Props> = ({ allData, startIndex, endInde
             return (
               <div key={period} className="flex gap-1.5">
                 <span className="font-bold" style={{ color: colors[i % 6] }}>MA{period}</span>
-                <span className="text-slate-100 font-medium">{avg.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}</span>
+                <span className="text-slate-100 font-medium">{Math.round(avg).toLocaleString()}</span>
               </div>
             );
           })}
@@ -129,9 +174,11 @@ export const CandlestickChart: React.FC<Props> = ({ allData, startIndex, endInde
         height="100%" 
         preserveAspectRatio="none" 
         viewBox={`0 0 ${width} ${height}`}
+        onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseLeave}
-        className="cursor-crosshair"
+        className="cursor-crosshair active:cursor-grabbing"
       >
         {/* Price Grid Lines */}
         {[0, 0.25, 0.5, 0.75, 1].map(tick => (
