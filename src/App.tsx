@@ -141,7 +141,7 @@ export default function App() {
       const randomFile = files[Math.floor(Math.random() * files.length)];
       console.log(`Loading random dataset: ${randomFile}`);
       
-      const response = await fetch(`${import.meta.env.BASE_URL}tree/main/public${randomFile}`);
+      const response = await fetch(`${import.meta.env.BASE_URL}blob/main/public${randomFile}`);
       const csvText = await response.text();
       
       Papa.parse(csvText, {
